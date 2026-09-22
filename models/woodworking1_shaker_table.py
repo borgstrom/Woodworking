@@ -2,12 +2,17 @@
 This is a roughly 32"x16"x33" Shaker table built in 2026 as part of Woodworking1
 """
 
-from copy import copy
-
-from build123d import *
+from build123d import IN, Compound, Pos, Rotation, Draft, Unit
+from toolbox.drawing import (
+    Across,
+    AcrossAxis,
+    DrawingCompound,
+    DrawingOrientation,
+    DrawingPlacement,
+)
 
 from toolbox.ocp_vscode import show_with_autoreload_in_vscode
-from toolbox.wood import GluedBoardsWidth, GluedBoardsThickness, PoplarBoard
+from toolbox.wood import GluedBoardsThickness, GluedBoardsWidth, PoplarBoard
 
 
 class Top(GluedBoardsWidth):
@@ -31,12 +36,27 @@ class LongApron(PoplarBoard):
 
 
 class ShortApron(PoplarBoard):
-    length = sum(Top.widths) - (2 * Top.overhang) - (2 * sum(Leg.thicknesses))
+    length = Top.width - (2 * Top.overhang) - (2 * Leg.thickness)
     width = 3.5 * IN
     thickness = 0.75 * IN
 
 
-class ShakerTable(Compound):
+class ShakerTable(DrawingCompound):
+    """
+    Woodworking1 Shaker Table
+    """
+
+    drafting_options = Draft(
+        font="Helvetica",
+        unit=Unit.IN,
+    )
+
+    annotations = {
+        DrawingOrientation.Front: [
+            Across("top", AcrossAxis.X, DrawingPlacement.ABOVE),
+        ],
+    }
+
     def __init__(self) -> None:
         top = Pos(0, 0, Leg.length + Top.thickness / 2) * Top()
         top.label = "top"
@@ -44,8 +64,8 @@ class ShakerTable(Compound):
         # Calculate the offsets for positioning the legs relative to the top
         # Since the design is symmetrical we only need one calculation
         # The permutations are just combinations of positive and negative offsets
-        dx = top.length / 2 - top.overhang - sum(Leg.thicknesses) / 2
-        dy = top.width / 2 - top.overhang - Leg.width / 2
+        dx = Top.length / 2 - Top.overhang - Leg.thickness / 2
+        dy = Top.width / 2 - Top.overhang - Leg.width / 2
 
         # Create the legs
         legs = []
@@ -85,4 +105,5 @@ class ShakerTable(Compound):
 
 
 table = ShakerTable()
-show_with_autoreload_in_vscode(table, names=["table"], render_joints=True)
+# show_with_autoreload_in_vscode(table, names=["table"], render_joints=True)
+show_with_autoreload_in_vscode(table.drawing())

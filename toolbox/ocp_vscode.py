@@ -15,17 +15,18 @@ def show_with_autoreload_in_vscode(*args, **kwargs):
     """
     if "debugpy" in sys.modules:
         show_with_autoreload(*args, **kwargs)
+    else:
+        print("Not running in a VSCode debugging session.")
 
 
 def show_with_autoreload(*args, **kwargs):
     """
     This overloads the `show` function from `ocp_vscode` to add automatic reloading when files change.
     """
-    try:
-        if sys.argv[1] == "show":
-            print("Sending objects to CAD viewer")
-            show(*args, **kwargs)
-    except IndexError:
+    if sys.argv[-1] == "show":
+        print("Sending objects to CAD viewer")
+        show(*args, **kwargs)
+    else:
         show(*args, **kwargs)
         try:
             path = Path(__file__).parent.parent

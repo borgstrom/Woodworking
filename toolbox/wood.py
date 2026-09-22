@@ -1,7 +1,8 @@
-from build123d import *
-from bd_materials import wood, core
+from bd_materials import core, wood
+from build123d import IN, Align, BasePartObject, Box, Compound, Location, RotationLike
 
 from toolbox.assembly import centers
+from toolbox.py import classproperty
 
 POPLAR = wood.custom_wood(
     name="Hardwood_POPLAR",
@@ -79,9 +80,9 @@ class GluedBoardsWidth(Compound):
     widths: list[float]
     thickness: float
 
-    @property
-    def width(self) -> float:
-        return sum(self.widths)
+    @classproperty
+    def width(cls) -> float:
+        return sum(cls.widths)
 
     def __init__(self) -> None:
         assert len(self.widths) > 1, "You must provide at least two widths"
@@ -107,9 +108,9 @@ class GluedBoardsThickness(Compound):
     width: float
     thicknesses: list[float]
 
-    @property
-    def thickness(self) -> float:
-        return sum(self.thicknesses)
+    @classproperty
+    def thickness(cls) -> float:
+        return sum(cls.thicknesses)
 
     def __init__(self) -> None:
         assert len(self.thicknesses) > 1, "You must provide at least two thicknesses"
