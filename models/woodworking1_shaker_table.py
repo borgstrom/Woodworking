@@ -54,6 +54,7 @@ class ShakerTable(DrawingCompound):
     annotations = {
         DrawingOrientation.Front: [
             Across("top", AcrossAxis.X, DrawingPlacement.ABOVE),
+            Across("top", AcrossAxis.Z, DrawingPlacement.RIGHT),
         ],
     }
 
