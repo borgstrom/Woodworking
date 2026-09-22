@@ -1,4 +1,7 @@
-import itertools
+"""
+This is a roughly 32"x16"x33" Shaker table built in 2026 as part of Woodworking1
+"""
+
 from copy import copy
 
 from build123d import *
@@ -38,17 +41,31 @@ class ShakerTable(Compound):
         top = Pos(0, 0, Leg.length + Top.thickness / 2) * Top()
         top.label = "top"
 
-        leg = Rotation(0, 90, 0) * Rotation(90, 0, 0) * Leg()
+        # Calculate the offsets for positioning the legs relative to the top
+        # Since the design is symmetrical we only need one calculation
+        # The permutations are just combinations of positive and negative offsets
+        dx = top.length / 2 - top.overhang - sum(Leg.thicknesses) / 2
+        dy = top.width / 2 - top.overhang - Leg.width / 2
 
-        dx = top.length / 2 - top.overhang - leg.thickness / 2
-        dy = top.width / 2 - top.overhang - leg.width / 2
-
+        # Create the legs
         legs = []
-        for sx, sy in itertools.product((-1, 1), repeat=2):
-            legN = Pos(sx * dx, sy * dy, leg.length / 2) * copy(leg)
-            legN.label = f"leg_{'N' if sy > 0 else 'S'}{'E' if sx > 0 else 'W'}"
+        for name, x, y in (
+            ("NE", dx, dy),
+            ("NW", -dx, dy),
+            ("SE", dx, -dy),
+            ("SW", -dx, -dy),
+        ):
+            legN = (
+                Pos(x, y, Leg.length / 2)
+                # Legs are oriented about their length, so we need to stand them up
+                * Rotation(0, 90, 0)
+                * Rotation(90, 0, 0)
+                * Leg()
+            )
+            legN.label = f"leg_{name}"
             legs.append(legN)
 
+        # Create the aprons
         aprons = []
         for Apron, name, x, y, y_rotation in (
             (LongApron, "N", 0, dy, 0),
@@ -57,20 +74,14 @@ class ShakerTable(Compound):
             (ShortApron, "W", -dx, 0, 90),
         ):
             apron = (
-                Pos(x, y, leg.length - Apron.width / 2)
+                Pos(x, y, Leg.length - Apron.width / 2)
                 * Rotation(90, y_rotation, 0)
                 * Apron()
             )
             apron.label = f"apron_{name}"
             aprons.append(apron)
 
-        super().__init__(
-            children=[
-                top,
-            ]
-            + legs
-            + aprons
-        )
+        super().__init__(children=[top] + legs + aprons)
 
 
 table = ShakerTable()
