@@ -3,7 +3,7 @@ from copy import copy
 
 from build123d import *
 
-from toolbox.ocp_vscode import show_with_autoreload
+from toolbox.ocp_vscode import show_with_autoreload_in_vscode
 from toolbox.wood import GluedBoardsWidth, GluedBoardsThickness, PoplarBoard
 
 
@@ -50,19 +50,18 @@ class ShakerTable(Compound):
             legs.append(legN)
 
         aprons = []
-        for (Apron, x, y, y_rotation), sign in itertools.product(
-            ((ShortApron, dx, 0, 90), (LongApron, 0, dy, 0)), (1, -1)
+        for Apron, name, x, y, y_rotation in (
+            (LongApron, "N", 0, dy, 0),
+            (LongApron, "S", 0, -dy, 0),
+            (ShortApron, "E", dx, 0, 90),
+            (ShortApron, "W", -dx, 0, 90),
         ):
             apron = (
-                Pos(
-                    x * sign,
-                    y * sign,
-                    leg.length - Apron.width / 2,
-                )
+                Pos(x, y, leg.length - Apron.width / 2)
                 * Rotation(90, y_rotation, 0)
                 * Apron()
             )
-            apron.label = f"apron_{offset}_{sign}"  # TODO
+            apron.label = f"apron_{name}"
             aprons.append(apron)
 
         super().__init__(
@@ -75,5 +74,4 @@ class ShakerTable(Compound):
 
 
 table = ShakerTable()
-
-show_with_autoreload(table, names=["table"], render_joints=True)
+show_with_autoreload_in_vscode(table, names=["table"], render_joints=True)

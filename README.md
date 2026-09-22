@@ -9,3 +9,9 @@ The `Pipfile` describes the required Python environment, so you'll need `pipenv`
 It is recommended to use `pyenv` to manage python versions so that you can match the version describe in the `Pipfile` and `.python-version`.
 
 With the correct version of Python available and pipenv installed you can run `pipenv install` to set up all the required modules.
+
+## Viewing models
+
+Install the OCP Cad Viewer VSCode extension, then "Start Debugging (F5)" in vscode on a model.
+
+The model will render in the viewer and auto-reload as you make changes.
