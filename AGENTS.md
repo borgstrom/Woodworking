@@ -1,0 +1,4 @@
+- You can find the build123d source in ../build123d (and should be on the tag for the version in this project). Warn the user if the source isn't there.
+- Always prefer using the source to confirm or explain things
+- Never guess. Never speculate.
+- Question implementation, not design intent. Where an unstated design choice would shape the implementation, ask; do not pick one and build on it.
