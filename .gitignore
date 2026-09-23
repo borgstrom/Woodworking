@@ -1,3 +1,6 @@
 *.pyc
 __pycache__
 *.egg-info/
+
+# We don't track rendered models
+models/*.svg

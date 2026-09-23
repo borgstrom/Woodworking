@@ -2,7 +2,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from watchfiles import watch
+from watchfiles import PythonFilter, watch
 
 from ocp_vscode import show
 
@@ -31,7 +31,7 @@ def show_with_autoreload(*args, **kwargs):
         try:
             path = Path(__file__).parent.parent
             print(f"Watching for file changes in {path}... CTRL+C to exit")
-            for _ in watch(path, debounce=500):
+            for _ in watch(path, watch_filter=PythonFilter()):
                 subprocess.run([sys.executable, sys.argv[0], "show"])
         except KeyboardInterrupt:
             pass

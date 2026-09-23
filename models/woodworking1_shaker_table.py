@@ -69,6 +69,7 @@ class ShakerTable(DrawingCompound):
             Between("apron_S", Side.BOTTOM, FLOOR, near=("leg_SE", Side.LEFT)),
             Overall(AcrossAxis.Z, DrawingPlacement.LEFT),
             Between("top", Side.RIGHT, "leg_SE", Side.RIGHT, near=("top", Side.BOTTOM)),
+            Across("leg_SE", AcrossAxis.X, DrawingPlacement.BELOW),
         ],
         DrawingOrientation.Side: [
             Between(
@@ -78,6 +79,9 @@ class ShakerTable(DrawingCompound):
             Across("top/board_3", AcrossAxis.Y, DrawingPlacement.BELOW),
             Across("top/board_4", AcrossAxis.Y, DrawingPlacement.BELOW),
             Across("top", AcrossAxis.Y, DrawingPlacement.ABOVE),
+            Across(
+                "leg_SW/board_2", AcrossAxis.Y, DrawingPlacement.BELOW, label="2 × {}"
+            ),
         ],
     }
 
@@ -134,5 +138,7 @@ class ShakerTable(DrawingCompound):
 
 
 table = ShakerTable()
+drawing = table.drawing()
+drawing.export_svg()
 # show_with_autoreload_in_vscode(table, names=["table"], render_joints=True)
-show_with_autoreload_in_vscode(table.drawing())
+show_with_autoreload_in_vscode(drawing)

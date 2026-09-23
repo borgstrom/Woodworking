@@ -1,7 +1,9 @@
+import inspect
 from collections.abc import Sequence
 from dataclasses import replace
 from enum import Enum
 from fnmatch import fnmatchcase
+from pathlib import Path
 
 from build123d import (
     IN,
@@ -14,6 +16,7 @@ from build123d import (
     Curve,
     Draft,
     Edge,
+    ExportSVG,
     Face,
     FontStyle,
     GeomType,
@@ -27,6 +30,7 @@ from build123d import (
     Sketch,
     TechnicalDrawing,
     Text,
+    Unit,
     Vector,
     Wire,
     trace,
@@ -222,10 +226,19 @@ def label(
     )
 
 
-def dimension(start: Vector, end: Vector, label_side: Vector, draft: Draft) -> Sketch:
+def dimension(
+    start: Vector,
+    end: Vector,
+    label_side: Vector,
+    draft: Draft,
+    text: str | None = None,
+) -> Sketch:
     """
     A dimension from start to end: a line with an arrow head at each end, and the
     measurement written beside the line, towards label_side.
+
+    text is an optional template for the label, where {} is replaced by the
+    measurement, e.g. "2 × {}" gives 2 × 0.75".
     """
     length = (end - start).length
     middle = (start + end) / 2
@@ -254,8 +267,10 @@ def dimension(start: Vector, end: Vector, label_side: Vector, draft: Draft) -> S
     # Text on a vertical dimension runs along the line
     direction = end - start
     rotated = abs(direction.Y) > abs(direction.X)
-    text = label(format_length(length, draft), middle, label_side, draft, rotated)
-    return Sketch([face for shape in (*arrows, text) for face in shape.faces()])
+    measurement = format_length(length, draft)
+    written = measurement if text is None else text.format(measurement)
+    text_shape = label(written, middle, label_side, draft, rotated)
+    return Sketch([face for shape in (*arrows, text_shape) for face in shape.faces()])
 
 
 def outside_dimension(
@@ -264,10 +279,11 @@ def outside_dimension(
     place: DrawingPlacement,
     offset: float,
     draft: Draft,
+    text: str | None = None,
 ) -> Sketch:
     """
     Dimension bbox across its width (horizontal) or height, with the dimension line
-    offset outside it on the place side.
+    offset outside it on the place side. text is a label template, as for dimension.
     """
     direction = PLACEMENT_DIRECTIONS.get(place)
     # A width is dimensioned above or below, and a height to the left or right
@@ -282,7 +298,7 @@ def outside_dimension(
     else:
         x = (bbox.max.X if direction.X > 0 else bbox.min.X) + direction.X * offset
         start, end = Vector(x, bbox.min.Y), Vector(x, bbox.max.Y)
-    return dimension(start, end, direction, draft)
+    return dimension(start, end, direction, draft, text)
 
 
 def is_horizontal(axis: AcrossAxis, view: DrawingView) -> bool:
@@ -335,6 +351,8 @@ class DrawingAnnotation:
 class Across(DrawingAnnotation):
     """
     Dimension a labeled part across its extent along a model axis.
+
+    label is an optional template for the text, where {} is the measurement.
     """
 
     # Distance between the part and the dimension line, on paper
@@ -345,10 +363,12 @@ class Across(DrawingAnnotation):
         name: str,
         axis: AcrossAxis,
         place: DrawingPlacement = DrawingPlacement.INSIDE,
+        label: str | None = None,
     ):
         self.name = name
         self.axis = axis
         self.place = place
+        self.label = label
 
     def build(
         self, obj: Compound, view: DrawingView, draft: Draft, scale: float
@@ -359,21 +379,27 @@ class Across(DrawingAnnotation):
             self.place,
             self.offset / scale,
             draft,
+            self.label,
         )
 
 
 class Overall(DrawingAnnotation):
     """
     Dimension the whole object across its extent along a model axis.
+
+    label is an optional template for the text, where {} is the measurement.
     """
 
     # Distance between the object and the dimension line, on paper. It's further out
     # than Across so the two don't collide when they're on the same side.
     offset = 0.5 * IN
 
-    def __init__(self, axis: AcrossAxis, place: DrawingPlacement):
+    def __init__(
+        self, axis: AcrossAxis, place: DrawingPlacement, label: str | None = None
+    ):
         self.axis = axis
         self.place = place
+        self.label = label
 
     def build(
         self, obj: Compound, view: DrawingView, draft: Draft, scale: float
@@ -384,6 +410,7 @@ class Overall(DrawingAnnotation):
             self.place,
             self.offset / scale,
             draft,
+            self.label,
         )
 
 
@@ -394,6 +421,8 @@ class Between(DrawingAnnotation):
 
     The dimension line runs a short distance out from the near side, and the
     measurement is written on that same side of the line.
+
+    label is an optional template for the text, where {} is the measurement.
     """
 
     # Distance between the near side and the dimension line, on paper
@@ -407,6 +436,7 @@ class Between(DrawingAnnotation):
         to_side: Side | None = None,
         *,
         near: tuple[str, Side],
+        label: str | None = None,
     ):
         if isinstance(to, Floor) != (to_side is None):
             raise ValueError("to_side is required, unless measuring to FLOOR")
@@ -415,6 +445,7 @@ class Between(DrawingAnnotation):
         self.to = to
         self.to_side = to_side
         self.near = near
+        self.label = label
 
     def build(
         self, obj: Compound, view: DrawingView, draft: Draft, scale: float
@@ -449,8 +480,10 @@ class Between(DrawingAnnotation):
         ) * (direction.X + direction.Y)
 
         if self.side.is_vertical:
-            return dimension(Vector(start, line), Vector(end, line), direction, draft)
-        return dimension(Vector(line, start), Vector(line, end), direction, draft)
+            start_point, end_point = Vector(start, line), Vector(end, line)
+        else:
+            start_point, end_point = Vector(line, start), Vector(line, end)
+        return dimension(start_point, end_point, direction, draft, self.label)
 
 
 def visible_fills(obj: DrawingCompound, view: DrawingView) -> list[Sketch]:
@@ -657,6 +690,9 @@ class DrawingPage(Compound):
     they and their annotations fit.
     """
 
+    # Width of the frame's border line, which is centered on the frame
+    border_width = 0.05 * IN
+
     def __init__(
         self,
         obj: DrawingCompound,
@@ -687,7 +723,7 @@ class DrawingPage(Compound):
                 (-frame_width / 2, -frame_height / 2),
             ],
         )
-        border = trace(frame_wire, 0.05 * IN)
+        border = trace(frame_wire, self.border_width)
 
         # Title: centered at the top of the frame, bold, and underlined.
         # FontStyle has no underline, so the underline is a separate traced line
@@ -737,6 +773,32 @@ class DrawingPage(Compound):
                 child.color = Color("black")
 
         super().__init__(children=children)
+        self.page_margin = page_margin
+        # Next to the model: the file that defines obj's class, with .svg for .py
+        self.svg_path = Path(inspect.getfile(type(obj))).with_suffix(".svg")
+
+    def export_svg(self) -> Path:
+        """
+        Write the page to an SVG file next to the model, e.g. models/table.py is
+        written to models/table.svg. The file is the size of the page, so it prints
+        at 100%.
+
+        Returns the path written to.
+        """
+        # ExportSVG sizes the file to the shapes, and the outermost shape is the
+        # border, which sticks out half its width past the frame. The margin makes up
+        # the rest of the page. fit_to_stroke is off because it would add the line
+        # weight (which is in mm) as inches.
+        exporter = ExportSVG(
+            unit=Unit.IN,
+            scale=1 / IN,
+            fit_to_stroke=False,
+            margin=(self.page_margin - self.border_width / 2) / IN,
+        )
+        # The children, not the page, so each keeps its own color
+        exporter.add_shape(self.children)
+        exporter.write(self.svg_path)
+        return self.svg_path
 
 
 class DrawingCompound(Compound):
