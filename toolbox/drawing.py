@@ -1,22 +1,30 @@
 from collections.abc import Sequence
 from dataclasses import replace
 from enum import Enum
+from fnmatch import fnmatchcase
 
 from build123d import (
     IN,
+    MM,
     Align,
+    Arrow,
     BoundBox,
     Color,
     Compound,
     Curve,
     Draft,
     Edge,
-    ExtensionLine,
+    Face,
     FontStyle,
+    GeomType,
+    Location,
+    NumberDisplay,
     PageSize,
     Plane,
     Pos,
+    Rot,
     ShapeList,
+    Sketch,
     TechnicalDrawing,
     Text,
     Vector,
@@ -41,7 +49,58 @@ class AcrossAxis(Enum):
 class DrawingPlacement(Enum):
     INSIDE = "INSIDE"
     ABOVE = "ABOVE"
+    BELOW = "BELOW"
+    LEFT = "LEFT"
     RIGHT = "RIGHT"
+
+
+# The page direction of each placement outside a part
+PLACEMENT_DIRECTIONS = {
+    DrawingPlacement.ABOVE: Vector(0, 1),
+    DrawingPlacement.BELOW: Vector(0, -1),
+    DrawingPlacement.LEFT: Vector(-1, 0),
+    DrawingPlacement.RIGHT: Vector(1, 0),
+}
+
+
+class Side(Enum):
+    """A side of a part, as seen on the page"""
+
+    LEFT = "LEFT"
+    RIGHT = "RIGHT"
+    TOP = "TOP"
+    BOTTOM = "BOTTOM"
+
+    @property
+    def is_vertical(self) -> bool:
+        """LEFT & RIGHT are vertical edges, so they're measured horizontally"""
+        return self in (Side.LEFT, Side.RIGHT)
+
+    @property
+    def direction(self) -> Vector:
+        """The page direction pointing out of the part from this side"""
+        return {
+            Side.LEFT: Vector(-1, 0),
+            Side.RIGHT: Vector(1, 0),
+            Side.TOP: Vector(0, 1),
+            Side.BOTTOM: Vector(0, -1),
+        }[self]
+
+    def position(self, bbox: BoundBox) -> float:
+        """Where this side of bbox is: an X for LEFT & RIGHT, a Y for TOP & BOTTOM"""
+        return {
+            Side.LEFT: bbox.min.X,
+            Side.RIGHT: bbox.max.X,
+            Side.TOP: bbox.max.Y,
+            Side.BOTTOM: bbox.min.Y,
+        }[self]
+
+
+class Floor:
+    """The bottom of the whole object, for measuring to with Between"""
+
+
+FLOOR = Floor()
 
 
 class DrawingView:
@@ -83,6 +142,182 @@ class DrawingView:
         ]
         return Wire.make_polygon(corners).bounding_box()
 
+    def silhouette(self, part: Shape) -> Sketch:
+        """The part's outline in this view, as a filled 2D shape"""
+        faces = []
+        for face in part.faces():
+            if face.geom_type != GeomType.PLANE:
+                raise NotImplementedError(
+                    f"Can't fill {part.label!r}, it has a non-planar face"
+                )
+            if abs(face.normal_at().dot(self.plane.z_dir)) < 1e-6:
+                continue  # Seen edge-on, so it covers no area
+            points = [
+                self.to_2d(edge.position_at(0))
+                for edge in face.outer_wire().order_edges()
+            ]
+            faces.append(Face(Wire.make_polygon(points)))
+        if len(faces) > 1:
+            faces = faces[0].fuse(*faces[1:]).clean().faces()
+        # The polygons' winding depends on the part's face, so normalize the normals.
+        # The CAD viewer shades faces by their normal, so mixed normals look different.
+        return Sketch([face if face.normal_at().Z > 0 else -face for face in faces])
+
+
+def format_length(length: float, draft: Draft) -> str:
+    """
+    Format a length like Draft does, but without trailing zeros: 32", 3.5", 0.75".
+
+    draft.decimal_precision is the most decimal places shown. Fractions are left to
+    Draft's own formatting.
+    """
+    if draft.number_display == NumberDisplay.FRACTION and not draft.is_metric:
+        return draft._number_with_units(length)
+    value = f"{length / (MM if draft.is_metric else IN):.{draft.decimal_precision}f}"
+    if "." in value:
+        value = value.rstrip("0").rstrip(".")
+    unit = Draft.unit_LUT[draft.is_metric] if draft.display_units else ""
+    return value + unit
+
+
+def label(
+    text: str, at: Vector, side: Vector, draft: Draft, rotated: bool = False
+) -> Shape:
+    """
+    Text placed next to the point at, towards side. The text's edge nearest the point
+    is aligned to it, e.g. its bottom when side points up.
+
+    Rotated text is turned 90 degrees to read from bottom to top.
+    """
+    text_shape = Text(
+        text,
+        font_size=draft.font_size,
+        font=draft.font,
+        font_style=draft.font_style,
+        align=(Align.CENTER, Align.CENTER),
+    )
+    if rotated:
+        text_shape = Rot(0, 0, 90) * text_shape
+
+    # Align after rotating, using the rotated text's extent
+    bbox = text_shape.bounding_box()
+
+    def shift(direction: float, low: float, high: float) -> float:
+        if direction > 0:
+            return -low
+        if direction < 0:
+            return -high
+        return -(low + high) / 2
+
+    return (
+        Pos(
+            at
+            + side.normalized() * draft.pad_around_text
+            + Vector(
+                shift(side.X, bbox.min.X, bbox.max.X),
+                shift(side.Y, bbox.min.Y, bbox.max.Y),
+            )
+        )
+        * text_shape
+    )
+
+
+def dimension(start: Vector, end: Vector, label_side: Vector, draft: Draft) -> Sketch:
+    """
+    A dimension from start to end: a line with an arrow head at each end, and the
+    measurement written beside the line, towards label_side.
+    """
+    length = (end - start).length
+    middle = (start + end) / 2
+
+    # Arrows run from the middle out to each end. When the dimension is too short
+    # for both arrow heads, they're outside instead, pointing in at the ends.
+    if length >= 2 * draft.arrow_length:
+        shafts = [Edge.make_line(middle, tip) for tip in (start, end)]
+    else:
+        direction = (end - start).normalized()
+        shafts = [
+            Edge.make_line(start - direction * 2 * draft.arrow_length, start),
+            Edge.make_line(end + direction * 2 * draft.arrow_length, end),
+        ]
+    arrows = [
+        Arrow(
+            draft.arrow_length,
+            shaft,
+            draft.line_width,
+            head_at_start=False,
+            head_type=draft.head_type,
+        )
+        for shaft in shafts
+    ]
+
+    # Text on a vertical dimension runs along the line
+    direction = end - start
+    rotated = abs(direction.Y) > abs(direction.X)
+    text = label(format_length(length, draft), middle, label_side, draft, rotated)
+    return Sketch([face for shape in (*arrows, text) for face in shape.faces()])
+
+
+def outside_dimension(
+    bbox: BoundBox,
+    horizontal: bool,
+    place: DrawingPlacement,
+    offset: float,
+    draft: Draft,
+) -> Sketch:
+    """
+    Dimension bbox across its width (horizontal) or height, with the dimension line
+    offset outside it on the place side.
+    """
+    direction = PLACEMENT_DIRECTIONS.get(place)
+    # A width is dimensioned above or below, and a height to the left or right
+    if direction is None or (direction.X != 0) == horizontal:
+        raise NotImplementedError(
+            f"{place.name} for a {'horizontal' if horizontal else 'vertical'} "
+            "dimension"
+        )
+    if horizontal:
+        y = (bbox.max.Y if direction.Y > 0 else bbox.min.Y) + direction.Y * offset
+        start, end = Vector(bbox.min.X, y), Vector(bbox.max.X, y)
+    else:
+        x = (bbox.max.X if direction.X > 0 else bbox.min.X) + direction.X * offset
+        start, end = Vector(x, bbox.min.Y), Vector(x, bbox.max.Y)
+    return dimension(start, end, direction, draft)
+
+
+def is_horizontal(axis: AcrossAxis, view: DrawingView) -> bool:
+    """Whether the model axis runs horizontally (or else vertically) in the view"""
+    axis_direction = Vector(**{a.value: int(a == axis) for a in AcrossAxis})
+    if abs(axis_direction.dot(view.plane.x_dir)) > 1 - 1e-6:
+        return True
+    if abs(axis_direction.dot(view.plane.y_dir)) > 1 - 1e-6:
+        return False
+    raise ValueError(
+        f"Axis {axis.value} is not parallel to the {view.orientation.name} view's page"
+    )
+
+
+def find_child(obj: Compound, path: str) -> Shape:
+    """
+    Find a labeled part by its path of labels, e.g. "top" or "top/board_2", placed
+    where it is in obj.
+
+    A child's location is relative to its parent (moving a Compound doesn't move its
+    children objects), so every ancestor's location is applied to the part.
+    """
+    shape: Shape = obj
+    location = Location()
+    for name in path.split("/"):
+        location = location * shape.location
+        matches = [child for child in shape.children if child.label == name]
+        if len(matches) != 1:
+            raise ValueError(
+                f"Expected one child labeled {name!r} for {path!r}, "
+                f"found {len(matches)}"
+            )
+        shape = matches[0]
+    return location * shape
+
 
 class DrawingAnnotation:
     def build(
@@ -118,59 +353,287 @@ class Across(DrawingAnnotation):
     def build(
         self, obj: Compound, view: DrawingView, draft: Draft, scale: float
     ) -> Shape:
-        matches = [child for child in obj.children if child.label == self.name]
-        if len(matches) != 1:
-            raise ValueError(
-                f"Expected one child labeled {self.name!r}, found {len(matches)}"
-            )
-        part = matches[0]
-
-        # Which 2D direction does the model axis run in this view?
-        axis_direction = Vector(**{a.value: int(a == self.axis) for a in AcrossAxis})
-        if abs(axis_direction.dot(view.plane.x_dir)) > 1 - 1e-6:
-            horizontal = True
-        elif abs(axis_direction.dot(view.plane.y_dir)) > 1 - 1e-6:
-            horizontal = False
-        else:
-            raise ValueError(
-                f"Axis {self.axis.value} is not parallel to the "
-                f"{view.orientation.name} view's page"
-            )
-
-        bbox = view.bounding_box_2d(part)
-        offset = self.offset / scale
-        match self.place, horizontal:
-            case DrawingPlacement.ABOVE, True:
-                border = Edge.make_line(
-                    (bbox.min.X, bbox.max.Y), (bbox.max.X, bbox.max.Y)
-                )
-                return ExtensionLine(border, offset=(0, offset), draft=draft)
-            case DrawingPlacement.RIGHT, False:
-                border = Edge.make_line(
-                    (bbox.max.X, bbox.min.Y), (bbox.max.X, bbox.max.Y)
-                )
-                return ExtensionLine(border, offset=(offset, 0), draft=draft)
-            case _:
-                raise NotImplementedError(
-                    f"Across {self.place.name} for a "
-                    f"{'horizontal' if horizontal else 'vertical'} axis"
-                )
-
-
-class Between(DrawingAnnotation):
-    pass
+        return outside_dimension(
+            view.bounding_box_2d(find_child(obj, self.name)),
+            is_horizontal(self.axis, view),
+            self.place,
+            self.offset / scale,
+            draft,
+        )
 
 
 class Overall(DrawingAnnotation):
-    pass
+    """
+    Dimension the whole object across its extent along a model axis.
+    """
+
+    # Distance between the object and the dimension line, on paper. It's further out
+    # than Across so the two don't collide when they're on the same side.
+    offset = 0.5 * IN
+
+    def __init__(self, axis: AcrossAxis, place: DrawingPlacement):
+        self.axis = axis
+        self.place = place
+
+    def build(
+        self, obj: Compound, view: DrawingView, draft: Draft, scale: float
+    ) -> Shape:
+        return outside_dimension(
+            view.bounding_box_2d(obj),
+            is_horizontal(self.axis, view),
+            self.place,
+            self.offset / scale,
+            draft,
+        )
 
 
-def fit_scale(content: BoundBox, width: float, height: float, padding: float) -> float:
-    """The scale that fits content into width x height, inside padding on all sides"""
-    return min(
-        (width - 2 * padding) / content.size.X,
-        (height - 2 * padding) / content.size.Y,
+class Between(DrawingAnnotation):
+    """
+    Dimension the distance between a side of one part and a side of another, or the
+    floor. e.g. the inside span between two legs.
+
+    The dimension line runs a short distance out from the near side, and the
+    measurement is written on that same side of the line.
+    """
+
+    # Distance between the near side and the dimension line, on paper
+    offset = 0.25 * IN
+
+    def __init__(
+        self,
+        name: str,
+        side: Side,
+        to: str | Floor,
+        to_side: Side | None = None,
+        *,
+        near: tuple[str, Side],
+    ):
+        if isinstance(to, Floor) != (to_side is None):
+            raise ValueError("to_side is required, unless measuring to FLOOR")
+        self.name = name
+        self.side = side
+        self.to = to
+        self.to_side = to_side
+        self.near = near
+
+    def build(
+        self, obj: Compound, view: DrawingView, draft: Draft, scale: float
+    ) -> Shape:
+        if isinstance(self.to, Floor):
+            to_bbox, to_side = view.bounding_box_2d(obj), Side.BOTTOM
+        else:
+            assert self.to_side is not None
+            to_bbox, to_side = (
+                view.bounding_box_2d(find_child(obj, self.to)),
+                self.to_side,
+            )
+        near_name, near_side = self.near
+
+        if self.side.is_vertical != to_side.is_vertical:
+            raise ValueError(
+                f"Can't measure between {self.side.name} and {to_side.name} sides"
+            )
+        if near_side.is_vertical == self.side.is_vertical:
+            valid = "TOP or BOTTOM" if self.side.is_vertical else "LEFT or RIGHT"
+            raise ValueError(
+                "near is the side the dimension line runs along, so measuring between "
+                f"{self.side.name} and {to_side.name} sides needs a {valid} side, "
+                f"not {near_side.name}"
+            )
+
+        start = self.side.position(view.bounding_box_2d(find_child(obj, self.name)))
+        end = to_side.position(to_bbox)
+        direction = near_side.direction
+        line = near_side.position(view.bounding_box_2d(find_child(obj, near_name))) + (
+            self.offset / scale
+        ) * (direction.X + direction.Y)
+
+        if self.side.is_vertical:
+            return dimension(Vector(start, line), Vector(end, line), direction, draft)
+        return dimension(Vector(line, start), Vector(line, end), direction, draft)
+
+
+def visible_fills(obj: DrawingCompound, view: DrawingView) -> list[Sketch]:
+    """
+    The filled parts of obj in this view, each clipped to what's visible.
+
+    Parts are visited nearest first, and each part's fill has everything nearer to the
+    viewer cut away. Parts without a fill color still hide the fills behind them.
+    """
+    parts = sorted(
+        obj.children,
+        key=lambda part: part.bounding_box().center().dot(view.plane.z_dir),
+        reverse=True,
     )
+    if all(obj.fill_color(part.label) is None for part in parts):
+        return []
+
+    fills = []
+    covered: Sketch | None = None
+    for part in parts:
+        silhouette = view.silhouette(part)
+        color = obj.fill_color(part.label)
+        if color is not None:
+            visible = silhouette if covered is None else silhouette - covered
+            if visible.faces():
+                visible.color = color
+                fills.append(visible)
+        covered = (
+            silhouette if covered is None else Sketch((covered + silhouette).faces())
+        )
+    return fills
+
+
+def scaled_draft(draft: Draft, scale: float) -> Draft:
+    """The draft's sizes, which are on paper, as full size model units at this scale"""
+    return replace(
+        draft,
+        font_size=draft.font_size / scale,
+        arrow_length=draft.arrow_length / scale,
+        line_width=draft.line_width / scale,
+        pad_around_text=draft.pad_around_text / scale,
+        extension_gap=draft.extension_gap / scale,
+    )
+
+
+class ViewContent:
+    """
+    Everything drawn in one view, at full size in the view's 2D coordinates.
+    """
+
+    def __init__(self, obj: DrawingCompound, orientation: DrawingOrientation):
+        self.obj = obj
+        self.view = DrawingView(orientation)
+        self.outline = self.view.project(obj)[0]
+        self.geometry = Curve(self.outline).bounding_box()
+        self.fills = visible_fills(obj, self.view)
+        self.annotations: list[Shape] = []
+        self.extent = self.geometry
+
+    def annotate(self, draft: Draft, scale: float) -> None:
+        """Build the annotations for a scale, and the view's extent including them"""
+        view_draft = scaled_draft(draft, scale)
+        self.annotations = [
+            annotation.build(self.obj, self.view, view_draft, scale)
+            for annotation in self.obj.annotations.get(self.view.orientation, [])
+        ]
+        self.extent = Compound([*self.outline, *self.annotations]).bounding_box()
+
+    def overhang(self, scale: float) -> tuple[float, float, float, float]:
+        """
+        How far the annotations reach past the geometry on paper: left, right, top &
+        bottom. Annotation sizes are set on paper, so this barely changes with scale.
+        """
+        geometry, extent = self.geometry, self.extent
+        return (
+            (geometry.min.X - extent.min.X) * scale,
+            (extent.max.X - geometry.max.X) * scale,
+            (extent.max.Y - geometry.max.Y) * scale,
+            (geometry.min.Y - extent.min.Y) * scale,
+        )
+
+    def shapes(self) -> list[Shape]:
+        # Fills come first so the outlines draw over them in the SVG
+        return [*self.fills, *self.outline, *self.annotations]
+
+
+def best_fit(
+    views: list[ViewContent],
+    region: BoundBox,
+    spacing: float,
+    draft: Draft,
+) -> tuple[float, list[Vector]]:
+    """
+    Find the largest scale, shared by all views, that fits them in region with their
+    annotations, and where each view's center goes.
+
+    The views are laid out either in a row, standing on the same floor line, or in a
+    column. Whichever allows the larger scale wins. Leftover space is shared evenly
+    between the views and the region's edges.
+
+    The annotations' size on paper depends slightly on the scale (e.g. short
+    dimensions put their arrows outside), so the fit is repeated with the annotations
+    rebuilt at each new scale until it settles.
+    """
+    width, height = region.size.X, region.size.Y
+    count = len(views)
+
+    def solve(overhangs: list[tuple[float, float, float, float]]) -> tuple[float, bool]:
+        sizes = [(view.geometry.size.X, view.geometry.size.Y) for view in views]
+        # Row: widths add up, and heights share the floor line
+        max_bottom = max(bottom for _, _, _, bottom in overhangs)
+        row = min(
+            (width - (count + 1) * spacing - sum(l + r for l, r, _, _ in overhangs))
+            / sum(w for w, _ in sizes),
+            *(
+                (height - 2 * spacing - max_bottom - top) / h
+                for (_, h), (_, _, top, _) in zip(sizes, overhangs)
+            ),
+        )
+        # Column: heights add up, and each view is centered across
+        column = min(
+            (height - (count + 1) * spacing - sum(t + b for _, _, t, b in overhangs))
+            / sum(h for _, h in sizes),
+            *(
+                (width - 2 * spacing - left - right) / w
+                for (w, _), (left, right, _, _) in zip(sizes, overhangs)
+            ),
+        )
+        return (row, True) if row >= column else (column, False)
+
+    # Start from the geometry alone, then refine with the annotations built to scale
+    scale, _ = solve([(0.0, 0.0, 0.0, 0.0)] * count)
+    best: tuple[float, bool] | None = None
+    built_at = None
+    for _ in range(10):
+        for view in views:
+            view.annotate(draft, scale)
+        built_at = scale
+        solved, in_row = solve([view.overhang(scale) for view in views])
+        fits = solved >= scale * (1 - 1e-9)
+        if fits and (best is None or scale > best[0]):
+            best = (scale, in_row)
+        if fits and solved <= scale * (1 + 1e-9):
+            break
+        scale = solved
+    if best is None:
+        raise RuntimeError("Couldn't fit the views and their annotations on the page")
+    scale, in_row = best
+    if built_at != scale:
+        for view in views:
+            view.annotate(draft, scale)
+
+    # Place each view's full extent, including annotations
+    overhangs = [view.overhang(scale) for view in views]
+    sizes = [
+        (
+            view.geometry.size.X * scale + left + right,
+            view.geometry.size.Y * scale + top + bottom,
+        )
+        for view, (left, right, top, bottom) in zip(views, overhangs)
+    ]
+    centers = []
+    if in_row:
+        gap = (width - sum(w for w, _ in sizes)) / (count + 1)
+        max_bottom = max(bottom for _, _, _, bottom in overhangs)
+        row_height = max_bottom + max(
+            view.geometry.size.Y * scale + top
+            for view, (_, _, top, _) in zip(views, overhangs)
+        )
+        floor = region.min.Y + (height - row_height) / 2 + max_bottom
+        x = region.min.X
+        for (w, h), (_, _, _, bottom) in zip(sizes, overhangs):
+            x += gap
+            centers.append(Vector(x + w / 2, floor - bottom + h / 2))
+            x += w
+    else:
+        gap = (height - sum(h for _, h in sizes)) / (count + 1)
+        y = region.max.Y
+        for w, h in sizes:
+            y -= gap
+            centers.append(Vector(region.center().X, y - h / 2))
+            y -= h
+    return scale, centers
 
 
 def place(
@@ -190,7 +653,8 @@ class DrawingPage(Compound):
 
     The page is shown in landscape orientation, with the title centered at the top.
 
-    Below the title the page is divided 50, 50 for the front and side views.
+    Below the title the front and side views are drawn at the same scale, as large as
+    they and their annotations fit.
     """
 
     def __init__(
@@ -206,7 +670,7 @@ class DrawingPage(Compound):
         title_font_size = title_font_size or 0.25 * IN
         page_size = page_size or PageSize.LETTER
         page_margin = page_margin or 0.25 * IN
-        view_padding = view_padding or 0.5 * IN
+        view_padding = view_padding or 0.75 * IN
         drafting_options = drafting_options or Draft()
 
         page_w, page_h = TechnicalDrawing.page_sizes[page_size]
@@ -245,76 +709,44 @@ class DrawingPage(Compound):
             drafting_options.line_width,
         )
 
-        # Layout: below the title, two columns of 50% each for the front & side views
-        view_width = frame_width * 0.5
-        view_height = title_underline_y - frame_bottom
-        view_center_y = frame_bottom + view_height / 2
-        front_center = Vector(frame_left + view_width / 2, view_center_y)
-        side_center = Vector(frame_left + view_width * 1.5, view_center_y)
-
-        # Front & side views share a scale, so it must fit whichever is larger
-        views = {
-            orientation: DrawingView(orientation)
+        # Below the title, the front & side views share a scale, and are sized and
+        # placed to fit the space as large as possible
+        views = [
+            ViewContent(obj, orientation)
             for orientation in (DrawingOrientation.Front, DrawingOrientation.Side)
-        }
-        projections = {
-            orientation: view.project(obj)[0] for orientation, view in views.items()
-        }
-        contents = {
-            orientation: Curve(edges).bounding_box()
-            for orientation, edges in projections.items()
-        }
-        view_scale = min(
-            fit_scale(content, view_width, view_height, view_padding)
-            for content in contents.values()
-        )
-
-        # The drafting options are sizes on paper, but annotations are built at full
-        # size and then scaled with the view
-        view_draft = replace(
-            drafting_options,
-            font_size=drafting_options.font_size / view_scale,
-            arrow_length=drafting_options.arrow_length / view_scale,
-            line_width=drafting_options.line_width / view_scale,
-            pad_around_text=drafting_options.pad_around_text / view_scale,
-            extension_gap=drafting_options.extension_gap / view_scale,
-        )
+        ]
+        region = Wire.make_polygon(
+            [
+                (frame_left, frame_bottom),
+                (frame_left + frame_width, title_underline_y),
+            ]
+        ).bounding_box()
+        scale, centers = best_fit(views, region, view_padding, drafting_options)
 
         view_shapes: list[Shape] = []
-        for orientation, center in (
-            (DrawingOrientation.Front, front_center),
-            (DrawingOrientation.Side, side_center),
-        ):
-            annotations = [
-                annotation.build(obj, views[orientation], view_draft, view_scale)
-                for annotation in obj.annotations.get(orientation, [])
-            ]
-            view_shapes.extend(
-                place(
-                    [*projections[orientation], *annotations],
-                    contents[orientation],
-                    view_scale,
-                    center,
-                )
-            )
+        for view, center in zip(views, centers):
+            view_shapes.extend(place(view.shapes(), view.extent, scale, center))
 
-        super().__init__(
-            children=[
-                border,
-                title_text,
-                title_underline,
-            ]
-            + view_shapes
-        )
+        children = [border, title_text, title_underline, *view_shapes]
 
-        # Children inherit this color, in both the CAD viewer and the SVG export
-        self.color = Color("black")
+        # Everything but the fills is black, in both the CAD viewer and the SVG.
+        # This is set on each child rather than on the page, because the viewer
+        # applies a color on the object passed to show() to all of its children.
+        for child in children:
+            if child.color is None:
+                child.color = Color("black")
+
+        super().__init__(children=children)
 
 
 class DrawingCompound(Compound):
     drafting_options: Draft
 
     annotations: dict[DrawingOrientation, list[DrawingAnnotation]]
+
+    # Fill colors for direct children, by fnmatch pattern on their label.
+    # The last matching pattern wins, and children that don't match aren't filled.
+    fill_colors: dict[str, Color] = {}
 
     page_size: PageSize | None = None
     page_margin: float | None = None
@@ -333,6 +765,13 @@ class DrawingCompound(Compound):
             page_margin=self.page_margin,
             drafting_options=self.drafting_options,
         )
+
+    def fill_color(self, label: str) -> Color | None:
+        color = None
+        for pattern, pattern_color in self.fill_colors.items():
+            if fnmatchcase(label, pattern):
+                color = pattern_color
+        return color
 
     def annotate(self, annotation: DrawingAnnotation):
         pass

@@ -2,15 +2,19 @@
 This is a roughly 32"x16"x33" Shaker table built in 2026 as part of Woodworking1
 """
 
-from build123d import IN, Compound, Pos, Rotation, Draft, Unit
+from build123d import IN, Color, Compound, Draft, Pos, Rotation, Unit
+
 from toolbox.drawing import (
+    FLOOR,
     Across,
     AcrossAxis,
+    Between,
     DrawingCompound,
     DrawingOrientation,
     DrawingPlacement,
+    Overall,
+    Side,
 )
-
 from toolbox.ocp_vscode import show_with_autoreload_in_vscode
 from toolbox.wood import GluedBoardsThickness, GluedBoardsWidth, PoplarBoard
 
@@ -55,7 +59,31 @@ class ShakerTable(DrawingCompound):
         DrawingOrientation.Front: [
             Across("top", AcrossAxis.X, DrawingPlacement.ABOVE),
             Across("top", AcrossAxis.Z, DrawingPlacement.RIGHT),
+            Across("leg_SW", AcrossAxis.Z, DrawingPlacement.LEFT),
+            Between(
+                "apron_S", Side.TOP, "apron_S", Side.BOTTOM, near=("leg_SW", Side.RIGHT)
+            ),
+            Between(
+                "leg_SW", Side.RIGHT, "leg_SE", Side.LEFT, near=("apron_S", Side.BOTTOM)
+            ),
+            Between("apron_S", Side.BOTTOM, FLOOR, near=("leg_SE", Side.LEFT)),
+            Overall(AcrossAxis.Z, DrawingPlacement.LEFT),
+            Between("top", Side.RIGHT, "leg_SE", Side.RIGHT, near=("top", Side.BOTTOM)),
         ],
+        DrawingOrientation.Side: [
+            Between(
+                "leg_SE", Side.RIGHT, "leg_NE", Side.LEFT, near=("apron_E", Side.BOTTOM)
+            ),
+            Across("top/board_2", AcrossAxis.Y, DrawingPlacement.BELOW),
+            Across("top/board_3", AcrossAxis.Y, DrawingPlacement.BELOW),
+            Across("top/board_4", AcrossAxis.Y, DrawingPlacement.BELOW),
+            Across("top", AcrossAxis.Y, DrawingPlacement.ABOVE),
+        ],
+    }
+
+    fill_colors = {
+        "*": Color("tan"),
+        "apron_*": Color("tan", 0.5),
     }
 
     def __init__(self) -> None:
