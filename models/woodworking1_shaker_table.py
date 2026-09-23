@@ -2,15 +2,15 @@
 This is a roughly 32"x16"x33" Shaker table built in 2026 as part of Woodworking1
 """
 
-from build123d import IN, Color, Compound, Draft, Pos, Rotation, Unit
+from build123d import IN, Color, Draft, Pos, Rotation, Unit
 
-from toolbox.drawing import (
+from toolbox.drawing.compound import DrawingCompound
+from toolbox.drawing.page import DrawingOrientation
+from toolbox.drawing.technical import (
     FLOOR,
     Across,
     AcrossAxis,
     Between,
-    DrawingCompound,
-    DrawingOrientation,
     DrawingPlacement,
     Overall,
     Side,
@@ -138,7 +138,12 @@ class ShakerTable(DrawingCompound):
 
 
 table = ShakerTable()
-drawing = table.drawing()
-drawing.export_svg()
-# show_with_autoreload_in_vscode(table, names=["table"], render_joints=True)
-show_with_autoreload_in_vscode(drawing)
+show_with_autoreload_in_vscode(table, names=["table"], render_joints=True)
+
+if __name__ == "__main__":
+    import sys
+
+    if sys.argv[-1] == "export":
+        print("EXPORTING SVG FILES...")
+        table.technical_drawing().export_svg()
+        table.cutlist().export_svg()
